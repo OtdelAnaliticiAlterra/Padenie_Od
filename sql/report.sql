@@ -72,10 +72,7 @@ SELECT
             AND (COALESCE(p."Выручка период сравнения", 0) - COALESCE(c."Выручка текущий период", 0)) > 20000
             AND ((COALESCE(p."Выручка период сравнения", 0) - COALESCE(c."Выручка текущий период", 0)) / COALESCE(p."Выручка период сравнения", 0) * 100) > 50
         THEN 'Да' ELSE 'Нет'
-    END AS "Падение",
-    :period_label   AS "Период",
-    :prev_label     AS "Прошлый период",
-    :future_label   AS "Период дополнительный"
+    END AS "Падение"
 FROM current_period c
 FULL OUTER JOIN previous_period p
     ON c."Основной менеджер" = p."Основной менеджер"
