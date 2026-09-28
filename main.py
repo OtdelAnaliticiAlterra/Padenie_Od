@@ -3,23 +3,27 @@
 
 Что делает:
   1. Считает 3 периода от текущей даты (26 → 25, окно 2 месяца).
-  2. Читает старый отчёт из папки previous/ (единственный .xlsx).
-  3. Выполняет SQL из sql/report.sql с параметрами периодов.
-  4. Делает "ВПР" #1 в pandas: тянет F:M старого в N:U нового по ключу 'Ключ'.
-  5. Делает "ВПР" #2 (fallback): тянет T и U старого в T и U нового,
-     но только в те ячейки, которые остались пустыми после шага 4.
-  6. Открывает Excel-шаблон templates/header_template.xlsx.
-  7. Пишет:
+  2. Скачивает прошлый отчёт из облака Алтерра в previous/.
+  3. Читает старый отчёт из папки previous/ (единственный .xlsx).
+  4. Выполняет SQL из sql/report.sql с параметрами периодов.
+  5. Делает "ВПР" #1 в pandas: тянет F:M старого в N:U нового по ключу 'Ключ'.
+  6. Делает "ВПР" #2 (fallback): тянет T и U старого в T и U нового,
+     но только в те ячейки, которые остались пустыми после шага 5.
+  7. Открывает Excel-шаблон templates/header_template.xlsx.
+  8. Пишет:
        - подписи периодов в шапку (F6, G6, H6),
        - данные SQL в A9:K{last},
        - значения из старого отчёта в N9:U{last},
        - fallback в T9:U{last} (только в пустые),
        - 0 и #Н/Д оставляет пустыми.
-  8. Сохраняет результат в output/Отчет_дистрибуция_<период>.xlsx
-  9. Удаляет старый файл из previous/.
+  9. Сохраняет результат в output/Отчет_дистрибуция_<период>.xlsx
+ 10. Загружает готовый отчёт в облако Алтерра.
+ 11. Удаляет старый файл из previous/.
 """
 
 from datetime import date
+from pathlib import Path
+
 from dateutil.relativedelta import relativedelta
 
 import pandas as pd
@@ -27,6 +31,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 import config
+import cloud
 from db import run_query
 
 
@@ -88,6 +93,38 @@ def fetch_data(params: dict) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Старый отчёт
 # ---------------------------------------------------------------------------
+
+def download_previous_from_cloud():
+    """Скачивает прошлый отчёт из облака Алтерра в папку previous/."""
+    print("Ищу прошлый отчёт в облаке...")
+
+    file_info = cloud.find_previous_report_in_folder(
+        folder_id=config.CLOUD_PREVIOUS_FOLDER_ID,
+        search_name=config.CLOUD_PREVIOUS_FILE_NAME,
+    )
+
+    if not file_info:
+        raise FileNotFoundError(
+            f"В облаке (папка ID={config.CLOUD_PREVIOUS_FOLDER_ID}) "
+            f"не найдено файлов по подстроке '{config.CLOUD_PREVIOUS_FILE_NAME}'"
+        )
+
+    file_id = file_info["id"]
+    file_name = file_info["name"]
+
+    # Чистим локальную папку previous/ перед скачиванием
+    for f in config.PREVIOUS_DIR.glob("*.xlsx"):
+        f.unlink()
+        print(f"Удалён локальный файл: {f.name}")
+
+    destination = config.PREVIOUS_DIR / file_name
+    cloud.download_file(file_id, destination)
+
+    if config.CLOUD_DELETE_PREVIOUS_AFTER_DOWNLOAD:
+        cloud.delete_file(file_id)
+
+    return destination
+
 
 def load_previous_report() -> pd.DataFrame:
     files = list(config.PREVIOUS_DIR.glob("*.xlsx"))
@@ -180,8 +217,11 @@ def save_excel(
     df_fallback: pd.DataFrame,
     params: dict,
 ) -> str:
-    period_for_name = params["period_label"].replace(" ", "").replace(".", "")
-    filename = f"Отчет_дистрибуция_{period_for_name}.xlsx"
+    # Имя файла: "Анализ падения по видам номенклатуры и дата
+    d1 = date.fromisoformat(params["cur_start"][:10])
+    d2 = date.fromisoformat(params["cur_end"][:10]) - relativedelta(days=1)
+    period_for_name = f"{d1:%d.%m.%y}-{d2:%d.%m.%y}"
+    filename = f"Анализ падения по видам номенклатуры {period_for_name}.xlsx"
     out_path = config.OUTPUT_DIR / filename
 
     wb = load_workbook(config.TEMPLATE_FILE)
@@ -299,12 +339,29 @@ def save_excel(
                 max_len = max(max_len, len(str(v)))
         ws.column_dimensions[letter].width = min(max_len + 2, 40)
 
-    # 7. Автофильтр + закрепление
+    # 7. Автофильтр
     ws.auto_filter.ref = f"A{start_row - 1}:U{last_data_row}"
-    ws.freeze_panes = f"A{start_row}"
 
     wb.save(out_path)
     return str(out_path)
+
+
+# ---------------------------------------------------------------------------
+# Отправка в облако
+# ---------------------------------------------------------------------------
+
+def upload_result_to_cloud(local_path: str) -> dict:
+    """Загружает готовый отчёт в облако Алтерра."""
+    print("Загружаю готовый отчёт в облако...")
+    path = Path(local_path)
+
+    file_info = cloud.upload_file(
+        local_path=path,
+        folder_id=config.CLOUD_OUTPUT_FOLDER_ID,
+        remote_name=path.name,
+    )
+    print(f"Отчёт загружен в облако: {path.name}")
+    return file_info
 
 
 # ---------------------------------------------------------------------------
@@ -320,23 +377,31 @@ def main():
     print(f"  Дополнит.: {params['future_label']}")
     print()
 
+    # 1. Скачиваем прошлый отчёт из облака
+    download_previous_from_cloud()
+
+    # 2. Читаем старый отчёт
     print("Читаю старый отчёт...")
     df_prev = load_previous_report()
 
+    # 3. Запрос к БД
     print("Выполняю запрос к БД...")
     df = fetch_data(params)
     print(f"Получено строк: {len(df)}")
 
-
+    # 4. VLOOKUP'ы
     df_lookup = build_lookup(df, df_prev)
-
-
     df_fallback = build_lookup_fallback(df, df_prev)
 
+    # 5. Сохраняем Excel
     path = save_excel(df, df_lookup, df_fallback, params)
     print(f"Готово: {path}")
 
-    # delete_previous_file()
+    # 6. Грузим в облако
+    upload_result_to_cloud(path)
+
+    # 7. Удаляем локальный старый файл
+    delete_previous_file()
 
 
 if __name__ == "__main__":
