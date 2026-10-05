@@ -4,4 +4,5 @@ __pycache__/
 .env
 Новый_файл/
 *.xlsx
+!Шапка/header_template.xlsx
 Старый_файл/

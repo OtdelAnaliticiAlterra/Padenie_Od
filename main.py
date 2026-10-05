@@ -34,6 +34,11 @@ import config
 import cloud
 from db import run_query
 
+import logging
+import os
+
+from max_logger import MaxLogger
+
 
 # ---------------------------------------------------------------------------
 # Периоды
@@ -405,4 +410,26 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    loger_token = os.environ.get("MAX_LOGGER_TOKEN") or ""
+    recipient_raw = os.environ.get("MAX_LOGGER_RECIPIENT_IDS") or ""
+
+    try:
+        recipient_ids = tuple(
+            int(x.strip()) for x in recipient_raw.split(",") if x.strip()
+        )
+    except ValueError:
+        recipient_ids = ()
+
+    logger = MaxLogger(
+        name="Падение ОД",
+        project_file=__file__,
+        token=loger_token,
+        recipient_ids=recipient_ids,
+        level=logging.INFO,
+    )
+
+    try:
+        main()
+    except Exception:
+        logger.exception("Необработанная ошибка при выполнении скрипта")
+        raise
